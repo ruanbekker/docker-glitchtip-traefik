@@ -1,0 +1,203 @@
+---
+version: '3.8'
+
+x-logging:
+  &default-logging
+  driver: "json-file"
+  options:
+    max-size: "1m"
+
+services:
+  glitchtip-traefik:
+    image: traefik:2.4
+    container_name: glitchtip-traefik
+    restart: unless-stopped
+    volumes:
+      - ./traefik/acme.json:/acme.json
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - glitchtip
+    ports:
+      - 80:80
+      - 443:443
+    command:
+      - '--api'
+      - '--providers.docker=true'
+      - '--providers.docker.exposedByDefault=false'
+      - '--entrypoints.http=true'
+      - '--entrypoints.http.address=:80'
+      - '--entrypoints.http.http.redirections.entrypoint.to=https'
+      - '--entrypoints.http.http.redirections.entrypoint.scheme=https'
+      - '--entrypoints.https=true'
+      - '--entrypoints.https.address=:443'
+      - '--certificatesResolvers.letsencrypt.acme.email=email@example.com'
+      - '--certificatesResolvers.letsencrypt.acme.storage=acme.json'
+      - '--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=http'
+      - '--log=true'
+      - '--log.level=INFO'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+
+  glitchtip-postgres:
+    image: postgres:13
+    container_name: glitchtip-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: "trust"
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - glitchtip
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 5
+    logging: *default-logging
+
+  glitchtip-redis:
+    image: redis
+    container_name: glitchtip-redis
+    restart: unless-stopped
+    networks:
+      - glitchtip
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 30s
+      retries: 50
+    logging: *default-logging
+
+  glitchtip-web:
+    image: glitchtip/glitchtip
+    container_name: glitchtip-web
+    restart: unless-stopped
+    depends_on:
+      glitchtip-traefik:
+        condition: service_started
+      glitchtip-postgres:
+        condition: service_healthy
+      glitchtip-redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@glitchtip-postgres:5432/postgres
+      REDIS_URL: redis://glitchtip-redis:6379/0
+      SECRET_KEY: jsdf93892309fhufhr
+      PORT: 8000
+      EMAIL_URL: "${EMAIL_URL}"
+      DEFAULT_FROM_EMAIL: ${EMAIL_FROM_ADDRESS}
+      GLITCHTIP_DOMAIN: "https://gt.$DOMAIN"
+      ENABLE_OPEN_USER_REGISTRATION: "False"
+      GLITCHTIP_MAX_EVENT_LIFE_DAYS: 90
+    networks:
+      - glitchtip
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.glitchtip.rule=Host(`gt.$DOMAIN`)'
+      - 'traefik.http.routers.glitchtip.entrypoints=https'
+      - 'traefik.http.routers.glitchtip.tls=true'
+      - 'traefik.http.routers.glitchtip.tls.certresolver=letsencrypt'
+      - 'traefik.http.routers.glitchtip.service=glitchtip-service'
+      - 'traefik.http.services.glitchtip-service.loadbalancer.server.port=8000'
+    logging: *default-logging
+
+  glitchtip-worker:
+    image: glitchtip/glitchtip
+    container_name: glitchtip-worker
+    restart: unless-stopped
+    command: celery -A glitchtip worker -B -l INFO
+    depends_on:
+      glitchtip-postgres:
+        condition: service_healthy
+      glitchtip-redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@glitchtip-postgres:5432/postgres
+      REDIS_URL: redis://glitchtip-redis:6379/0
+      SECRET_KEY: jsdf93892309fhufhr
+      PORT: 8000
+      EMAIL_URL: "${EMAIL_URL}"
+      DEFAULT_FROM_EMAIL: ${EMAIL_FROM_ADDRESS}
+      GLITCHTIP_DOMAIN: "https://gt.$DOMAIN"
+    networks:
+      - glitchtip
+    logging: *default-logging
+
+  glitchtip-migrate:
+    image: glitchtip/glitchtip
+    container_name: glitchtip-migrate
+    depends_on:
+      glitchtip-postgres:
+        condition: service_healthy
+      glitchtip-redis:
+        condition: service_healthy
+    command: "./manage.py migrate"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@glitchtip-postgres:5432/postgres
+      REDIS_URL: redis://glitchtip-redis:6379/0
+      SECRET_KEY: jsdf93892309fhufhr
+      PORT: 8000
+      EMAIL_URL: "${EMAIL_URL}"
+      DEFAULT_FROM_EMAIL: ${EMAIL_FROM_ADDRESS}
+      GLITCHTIP_DOMAIN: "https://gt.$DOMAIN"
+    networks:
+      - glitchtip
+    logging: *default-logging
+
+  glitchtip-flask-app:
+    build:
+      context: flask-app
+      dockerfile: Dockerfile
+    container_name: glitchtip-flask-app
+    restart: unless-stopped
+    depends_on:
+      glitchtip-traefik:
+        condition: service_started
+    environment:
+      DSN: "https://$GLITCHTIP_DSN@gt.$DOMAIN/1"
+    networks:
+      - glitchtip
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.app.rule=Host(`flask-app.$DOMAIN`)'
+      - 'traefik.http.routers.app.entrypoints=https'
+      - 'traefik.http.routers.app.tls=true'
+      - 'traefik.http.routers.app.tls.certresolver=letsencrypt'
+      - 'traefik.http.routers.app.service=app-service'
+      - 'traefik.http.services.app-service.loadbalancer.server.port=80'
+    logging: *default-logging
+
+  glitchtip-flask-webhook:
+    build:
+      context: flask-webhook
+      dockerfile: Dockerfile
+    container_name: glitchtip-flask-webhook
+    restart: unless-stopped
+    depends_on:
+      glitchtip-traefik:
+        condition: service_started
+    networks:
+      - glitchtip
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.webhook.rule=Host(`flask-webhook.$DOMAIN`)'
+      - 'traefik.http.routers.webhook.entrypoints=https'
+      - 'traefik.http.routers.webhook.tls=true'
+      - 'traefik.http.routers.webhook.tls.certresolver=letsencrypt'
+      - 'traefik.http.routers.webhook.service=webhook-service'
+      - 'traefik.http.services.webhook-service.loadbalancer.server.port=80'
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+
+networks:
+  glitchtip:
+    name: glitchtip
