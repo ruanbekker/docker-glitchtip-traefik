@@ -61,7 +61,7 @@ services:
     logging: *default-logging
 
   glitchtip-redis:
-    image: redis
+    image: redis:6
     container_name: glitchtip-redis
     restart: unless-stopped
     networks:
@@ -74,7 +74,7 @@ services:
     logging: *default-logging
 
   glitchtip-web:
-    image: glitchtip/glitchtip
+    image: glitchtip/glitchtip:v3.1.0
     container_name: glitchtip-web
     restart: unless-stopped
     depends_on:
@@ -107,7 +107,7 @@ services:
     logging: *default-logging
 
   glitchtip-worker:
-    image: glitchtip/glitchtip
+    image: glitchtip/glitchtip:v3.1.0
     container_name: glitchtip-worker
     restart: unless-stopped
     command: celery -A glitchtip worker -B -l INFO
@@ -129,7 +129,7 @@ services:
     logging: *default-logging
 
   glitchtip-migrate:
-    image: glitchtip/glitchtip
+    image: glitchtip/glitchtip:v3.1.0
     container_name: glitchtip-migrate
     depends_on:
       glitchtip-postgres:
